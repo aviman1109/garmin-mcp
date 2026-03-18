@@ -539,13 +539,14 @@ def register_tools(
     async def get_activity_details(
         account_id: str,
         activity_id: int,
-        max_datapoints: int = 1000,
+        max_datapoints: int = 200,
         ctx: Context | None = None,
     ) -> str | CallToolResult:
-        """Get per-second time-series for one activity: heart rate, cadence, pace, power, stride length, elevation.
+        """Get time-series for one activity: heart rate, cadence, pace, power, stride length, elevation.
 
-        Returns a list of data points, each with named metric fields.
-        Use max_datapoints to limit response size (default 1000, max ~2000).
+        Returns sampled data points with named metric fields.
+        max_datapoints controls sampling density (default 200, max ~2000).
+        For a full-resolution dump use max_datapoints=2000 (response will be large).
         """
 
         auth_error = require_account_access(
@@ -554,6 +555,10 @@ def register_tools(
         )
         if auth_error:
             return auth_error
+
+        def _r(v, digits=1):
+            """Round a float value; return None if falsy."""
+            return round(v, digits) if v else None
 
         try:
             client = manager.get_client(account_id)
@@ -572,33 +577,40 @@ def register_tools(
             for item in raw.get("activityDetailMetrics", []):
                 m = item["metrics"]
                 ts_ms = _get(m, "directTimestamp")
+                cadence = _get(m, "directDoubleCadence") or ((_get(m, "directRunCadence") or 0) * 2 or None)
                 points.append(_clean({
-                    "timestamp_ms": int(ts_ms) if ts_ms else None,
-                    "elapsed_seconds": _get(m, "sumElapsedDuration"),
-                    "distance_meters": _get(m, "sumDistance"),
-                    "heart_rate_bpm": _get(m, "directHeartRate"),
-                    "cadence_spm": _get(m, "directDoubleCadence") or (
-                        (_get(m, "directRunCadence") or 0) * 2 or None
-                    ),
-                    "speed_mps": _get(m, "directSpeed"),
-                    "grade_adjusted_speed_mps": _get(m, "directGradeAdjustedSpeed"),
-                    "elevation_m": _get(m, "directElevation"),
-                    "power_watts": _get(m, "directPower"),
-                    "stride_length_m": _get(m, "directStrideLength"),
-                    "vertical_oscillation_mm": _get(m, "directVerticalOscillation"),
-                    "ground_contact_time_ms": _get(m, "directGroundContactTime"),
-                    "vertical_ratio_pct": _get(m, "directVerticalRatio"),
-                    "performance_condition": _get(m, "directPerformanceCondition"),
-                    "body_battery": _get(m, "directBodyBattery"),
+                    "t": int(ts_ms) if ts_ms else None,
+                    "s": _r(_get(m, "sumElapsedDuration"), 0),
+                    "d": _r(_get(m, "sumDistance"), 1),
+                    "hr": _r(_get(m, "directHeartRate"), 0),
+                    "cad": _r(cadence, 0),
+                    "spd": _r(_get(m, "directSpeed"), 2),
+                    "spd_ga": _r(_get(m, "directGradeAdjustedSpeed"), 2),
+                    "ele": _r(_get(m, "directElevation"), 1),
+                    "pwr": _r(_get(m, "directPower"), 0),
+                    "stride": _r(_get(m, "directStrideLength"), 2),
+                    "vo_mm": _r(_get(m, "directVerticalOscillation"), 1),
+                    "gct_ms": _r(_get(m, "directGroundContactTime"), 0),
+                    "vr_pct": _r(_get(m, "directVerticalRatio"), 1),
+                    "pc": _r(_get(m, "directPerformanceCondition"), 0),
+                    "bb": _r(_get(m, "directBodyBattery"), 0),
                 }))
 
-            available_metrics = [d["key"] for d in descriptors]
+            legend = {
+                "t": "timestamp_ms", "s": "elapsed_seconds", "d": "distance_meters",
+                "hr": "heart_rate_bpm", "cad": "cadence_spm", "spd": "speed_mps",
+                "spd_ga": "grade_adjusted_speed_mps", "ele": "elevation_m",
+                "pwr": "power_watts", "stride": "stride_length_m",
+                "vo_mm": "vertical_oscillation_mm", "gct_ms": "ground_contact_time_ms",
+                "vr_pct": "vertical_ratio_pct", "pc": "performance_condition",
+                "bb": "body_battery",
+            }
             return _json({
                 "account_id": account_id,
                 "activity_id": activity_id,
                 "total_datapoints": raw.get("totalMetricsCount", len(points)),
                 "returned_datapoints": len(points),
-                "available_metrics": available_metrics,
+                "legend": legend,
                 "timeseries": points,
             })
         except Exception as err:
